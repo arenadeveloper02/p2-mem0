@@ -1,4 +1,5 @@
 import logging
+import os
 import sqlite3
 import threading
 import uuid
@@ -10,10 +11,19 @@ logger = logging.getLogger(__name__)
 class SQLiteManager:
     def __init__(self, db_path: str = ":memory:"):
         self.db_path = db_path
-        self.connection = sqlite3.connect(self.db_path, check_same_thread=False)
-        self._lock = threading.Lock()
-        self._migrate_history_table()
-        self._create_history_table()
+        # Ensure directory exists for file-based databases
+        if db_path != ":memory:":
+            db_dir = os.path.dirname(os.path.abspath(db_path))
+            if db_dir:  # Only create if there's a directory path (not root)
+                os.makedirs(db_dir, exist_ok=True)
+        try:
+            self.connection = sqlite3.connect(self.db_path, check_same_thread=False)
+            self._lock = threading.Lock()
+            self._migrate_history_table()
+            self._create_history_table()
+        except (sqlite3.OperationalError, OSError) as e:
+            logger.error(f"Failed to create SQLite database at {db_path}: {e}")
+            raise
 
     def _migrate_history_table(self) -> None:
         """
@@ -210,9 +220,16 @@ class SQLiteManager:
                 raise
 
     def close(self) -> None:
-        if self.connection:
-            self.connection.close()
-            self.connection = None
+        if hasattr(self, 'connection') and self.connection:
+            try:
+                self.connection.close()
+            except Exception as e:
+                logger.warning(f"Error closing SQLite connection: {e}")
+            finally:
+                self.connection = None
 
     def __del__(self):
-        self.close()
+        try:
+            self.close()
+        except Exception:
+            pass  # Ignore errors during cleanup
