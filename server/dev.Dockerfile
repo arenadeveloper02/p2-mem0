@@ -16,7 +16,7 @@ COPY pyproject.toml .
 COPY poetry.lock .
 COPY README.md .
 COPY mem0 ./mem0
-RUN pip install -e .[graph]
+RUN pip install -e .[graph,vector_stores]
 
 # Return to app directory and copy server code
 WORKDIR /app

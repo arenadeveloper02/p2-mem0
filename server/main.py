@@ -15,45 +15,110 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 load_dotenv()
 
 
-POSTGRES_HOST = os.environ.get("POSTGRES_HOST", "postgres")
-POSTGRES_PORT = os.environ.get("POSTGRES_PORT", "5432")
-POSTGRES_DB = os.environ.get("POSTGRES_DB", "postgres")
-POSTGRES_USER = os.environ.get("POSTGRES_USER", "postgres")
-POSTGRES_PASSWORD = os.environ.get("POSTGRES_PASSWORD", "postgres")
-POSTGRES_COLLECTION_NAME = os.environ.get("POSTGRES_COLLECTION_NAME", "memories")
+# Milvus Configuration
+MILVUS_HOST = os.environ.get("MILVUS_HOST", "milvus")
+MILVUS_PORT = os.environ.get("MILVUS_PORT", "19530")
+MILVUS_URL = os.environ.get("MILVUS_URL", f"http://{MILVUS_HOST}:{MILVUS_PORT}")
+MILVUS_TOKEN = os.environ.get("MILVUS_TOKEN", "")  # Empty for local setup, required for Zilliz Cloud
+MILVUS_COLLECTION_NAME = os.environ.get("MILVUS_COLLECTION_NAME", "memories")
+MILVUS_DB_NAME = os.environ.get("MILVUS_DB_NAME", "")
+MILVUS_EMBEDDING_DIMS = int(os.environ.get("MILVUS_EMBEDDING_DIMS", "1536"))  # text-embedding-3-small dimensions
+MILVUS_METRIC_TYPE = os.environ.get("MILVUS_METRIC_TYPE", "COSINE")  # COSINE, L2, or IP
 
-NEO4J_URI = os.environ.get("NEO4J_URI", "bolt://neo4j:7687")
+# Neo4j Configuration (for graph store - optional)
+# Check if Neo4j should be enabled (via environment variable)
+ENABLE_NEO4J = os.environ.get("ENABLE_NEO4J", "false").lower() == "true"
+NEO4J_URI = os.environ.get("NEO4J_URI", "bolt://localhost:7687")
 NEO4J_USERNAME = os.environ.get("NEO4J_USERNAME", "neo4j")
 NEO4J_PASSWORD = os.environ.get("NEO4J_PASSWORD", "mem0graph")
 
-MEMGRAPH_URI = os.environ.get("MEMGRAPH_URI", "bolt://localhost:7687")
-MEMGRAPH_USERNAME = os.environ.get("MEMGRAPH_USERNAME", "memgraph")
-MEMGRAPH_PASSWORD = os.environ.get("MEMGRAPH_PASSWORD", "mem0graph")
+# Test Neo4j connection if enabled (optional, won't fail if unavailable)
+NEO4J_AVAILABLE = False
+if ENABLE_NEO4J:
+    try:
+        import socket
+        # Parse URI to get host and port
+        # Handle bolt://, neo4j://, neo4j+s://, bolt+s://
+        uri_clean = NEO4J_URI
+        for prefix in ["bolt://", "neo4j://", "bolt+s://", "neo4j+s://"]:
+            if uri_clean.startswith(prefix):
+                uri_clean = uri_clean.replace(prefix, "")
+                break
+        
+        uri_part = uri_clean.split("/")[0]
+        if ":" in uri_part:
+            host, port = uri_part.split(":")
+        else:
+            host, port = uri_part, "7687"
+        port = int(port)
+        
+        # Test if port is open
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(2)
+        result = sock.connect_ex((host, port))
+        sock.close()
+        NEO4J_AVAILABLE = result == 0
+    except Exception as e:
+        # If connection test fails, assume unavailable (connection will be tested by Neo4j driver)
+        # For cloud Neo4j (neo4j+s://), socket test might fail but connection might still work
+        # So we'll let the Neo4j driver try the connection
+        logging.debug(f"Neo4j socket test failed: {e}. Will let Neo4j driver handle connection.")
+        # For cloud instances, assume available if URI is set (driver will verify)
+        if "databases.neo4j.io" in NEO4J_URI or "neo4j+s://" in NEO4J_URI or "neo4j://" in NEO4J_URI:
+            NEO4J_AVAILABLE = True  # Assume available for cloud, driver will verify
+        else:
+            NEO4J_AVAILABLE = False
 
+# OpenAI Configuration
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-HISTORY_DB_PATH = os.environ.get("HISTORY_DB_PATH", "/app/history/history.db")
+
+# History Database Path - Ensure directory exists and resolve to absolute path
+_history_db_path_env = os.environ.get("HISTORY_DB_PATH", "./history/history.db")
+if _history_db_path_env != ":memory:":
+    # Resolve to absolute path
+    _history_db_path_abs = os.path.abspath(_history_db_path_env)
+    # Get directory path
+    _history_db_dir = os.path.dirname(_history_db_path_abs)
+    # Create directory if it doesn't exist
+    os.makedirs(_history_db_dir, exist_ok=True)
+    HISTORY_DB_PATH = _history_db_path_abs
+else:
+    HISTORY_DB_PATH = ":memory:"
 
 DEFAULT_CONFIG = {
     "version": "v1.1",
     "vector_store": {
-        "provider": "pgvector",
+        "provider": "milvus",
         "config": {
-            "host": POSTGRES_HOST,
-            "port": int(POSTGRES_PORT),
-            "dbname": POSTGRES_DB,
-            "user": POSTGRES_USER,
-            "password": POSTGRES_PASSWORD,
-            "collection_name": POSTGRES_COLLECTION_NAME,
+            "url": MILVUS_URL,
+            "token": MILVUS_TOKEN,
+            "collection_name": MILVUS_COLLECTION_NAME,
+            "embedding_model_dims": MILVUS_EMBEDDING_DIMS,
+            "metric_type": MILVUS_METRIC_TYPE,
+            "db_name": MILVUS_DB_NAME,
         },
-    },
-    "graph_store": {
-        "provider": "neo4j",
-        "config": {"url": NEO4J_URI, "username": NEO4J_USERNAME, "password": NEO4J_PASSWORD},
     },
     "llm": {"provider": "openai", "config": {"api_key": OPENAI_API_KEY, "temperature": 0.2, "model": "gpt-4.1-nano-2025-04-14"}},
     "embedder": {"provider": "openai", "config": {"api_key": OPENAI_API_KEY, "model": "text-embedding-3-small"}},
     "history_db_path": HISTORY_DB_PATH,
 }
+
+# Only add graph_store if Neo4j is enabled and available
+if ENABLE_NEO4J and NEO4J_AVAILABLE:
+    DEFAULT_CONFIG["graph_store"] = {
+        "provider": "neo4j",
+        "config": {"url": NEO4J_URI, "username": NEO4J_USERNAME, "password": NEO4J_PASSWORD},
+    }
+elif ENABLE_NEO4J and not NEO4J_AVAILABLE:
+    # Don't add graph_store if Neo4j is enabled but unavailable - this will cause errors
+    # Instead, log a warning and skip graph_store entirely
+    logging.warning(
+        f"Neo4j is enabled (ENABLE_NEO4J=true) but not available at {NEO4J_URI}. "
+        "Graph memory features will be disabled. "
+        "To enable Neo4j, start it and verify the connection. "
+        "To disable Neo4j features, set ENABLE_NEO4J=false or leave it unset."
+    )
+# If ENABLE_NEO4J is false/unset, graph_store is simply not included (default behavior)
 
 
 MEMORY_INSTANCE = Memory.from_config(DEFAULT_CONFIG)
