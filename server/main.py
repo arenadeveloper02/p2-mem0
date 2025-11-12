@@ -3,8 +3,9 @@ import os
 from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from mem0 import Memory
@@ -129,6 +130,15 @@ app = FastAPI(
     version="1.0.0",
 )
 
+# Add CORS middleware to handle cross-origin requests
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # In production, replace with specific origins
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 class Message(BaseModel):
     role: str = Field(..., description="Role of the message (user or assistant).")
@@ -141,6 +151,7 @@ class MemoryCreate(BaseModel):
     agent_id: Optional[str] = None
     run_id: Optional[str] = None
     metadata: Optional[Dict[str, Any]] = None
+    infer: Optional[bool] = True
 
 
 class SearchRequest(BaseModel):
@@ -160,14 +171,34 @@ def set_config(config: Dict[str, Any]):
 
 
 @app.post("/memories", summary="Create memories")
-def add_memory(memory_create: MemoryCreate):
+def add_memory(request: Request, memory_create: MemoryCreate):
     """Store new memories."""
+    # Log request details for debugging
+    logging.info(f"Request headers: {request}")
+    logging.info(f"Received add_memory request: user_id={memory_create.user_id}, agent_id={memory_create.agent_id}, run_id={memory_create.run_id}, messages_count={len(memory_create.messages) if memory_create.messages else 0}, infer={memory_create.infer} (type: {type(memory_create.infer)})")
+    
     if not any([memory_create.user_id, memory_create.agent_id, memory_create.run_id]):
-        raise HTTPException(status_code=400, detail="At least one identifier (user_id, agent_id, run_id) is required.")
+        raise HTTPException(
+            status_code=400, 
+            detail="At least one identifier (user_id, agent_id, run_id) is required."
+        )
+
+    if not memory_create.messages or len(memory_create.messages) == 0:
+        raise HTTPException(
+            status_code=400,
+            detail="At least one message is required in the messages array."
+        )
 
     params = {k: v for k, v in memory_create.model_dump().items() if v is not None and k != "messages"}
+    # Explicitly include infer even if it's False (since False is falsy but not None)
+    if "infer" in memory_create.model_dump():
+        params["infer"] = memory_create.infer
+    logging.info(f"Calling MEMORY_INSTANCE.add with params: {params}, messages_count: {len(memory_create.messages)}")
+    logging.info(f"Infer value in params: {params.get('infer')} (type: {type(params.get('infer'))})")
     try:
         response = MEMORY_INSTANCE.add(messages=[m.model_dump() for m in memory_create.messages], **params)
+        results_count = len(response.get('results', [])) if isinstance(response, dict) else 0
+        logging.info(f"Memory add completed. Stored {results_count} memories. Response keys: {list(response.keys()) if isinstance(response, dict) else 'N/A'}")
         return JSONResponse(content=response)
     except Exception as e:
         logging.exception("Error in add_memory:")  # This will log the full traceback
@@ -187,7 +218,10 @@ def get_all_memories(
         params = {
             k: v for k, v in {"user_id": user_id, "run_id": run_id, "agent_id": agent_id}.items() if v is not None
         }
-        return MEMORY_INSTANCE.get_all(**params)
+        logging.info(f"Retrieving memories with filters: {params}")
+        result = MEMORY_INSTANCE.get_all(**params)
+        logging.info(f"Retrieved {len(result.get('results', []))} memories")
+        return result
     except Exception as e:
         logging.exception("Error in get_all_memories:")
         raise HTTPException(status_code=500, detail=str(e))
