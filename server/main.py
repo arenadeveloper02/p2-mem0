@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
 from pydantic import BaseModel, Field
 
 from mem0 import Memory
@@ -136,6 +137,46 @@ app = FastAPI(
     version="1.0.0",
 )
 
+# Add middleware to log all requests with client IP
+class LoggingMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        # Get client IP address
+        client_ip = request.client.host if request.client else "unknown"
+        # Check for forwarded IP (in case behind proxy)
+        forwarded_for = request.headers.get("X-Forwarded-For")
+        real_ip = request.headers.get("X-Real-IP")
+        if forwarded_for:
+            client_ip = forwarded_for.split(",")[0].strip()
+        elif real_ip:
+            client_ip = real_ip
+        
+        # Log request details
+        logging.info(
+            f"Request: {request.method} {request.url.path} | "
+            f"Client IP: {client_ip} | "
+            f"User-Agent: {request.headers.get('user-agent', 'unknown')} | "
+            f"Origin: {request.headers.get('origin', 'unknown')}"
+        )
+        
+        try:
+            response = await call_next(request)
+            logging.info(
+                f"Response: {request.method} {request.url.path} | "
+                f"Status: {response.status_code} | "
+                f"Client IP: {client_ip}"
+            )
+            return response
+        except Exception as e:
+            logging.error(
+                f"Error processing request: {request.method} {request.url.path} | "
+                f"Client IP: {client_ip} | "
+                f"Error: {str(e)}"
+            )
+            raise
+
+# Add logging middleware first
+app.add_middleware(LoggingMiddleware)
+
 # Add CORS middleware to handle cross-origin requests
 app.add_middleware(
     CORSMiddleware,
@@ -179,8 +220,18 @@ def set_config(config: Dict[str, Any]):
 @app.post("/memories", summary="Create memories")
 def add_memory(request: Request, memory_create: MemoryCreate):
     """Store new memories."""
+    # Get client IP for detailed logging
+    client_ip = request.client.host if request.client else "unknown"
+    forwarded_for = request.headers.get("X-Forwarded-For")
+    real_ip = request.headers.get("X-Real-IP")
+    if forwarded_for:
+        client_ip = forwarded_for.split(",")[0].strip()
+    elif real_ip:
+        client_ip = real_ip
+    
     # Log request details for debugging
-    logging.info(f"Request headers: {request}")
+    logging.info(f"Request from IP: {client_ip}")
+    logging.info(f"Request headers: {dict(request.headers)}")
     logging.info(f"Received add_memory request: user_id={memory_create.user_id}, agent_id={memory_create.agent_id}, run_id={memory_create.run_id}, messages_count={len(memory_create.messages) if memory_create.messages else 0}, infer={memory_create.infer} (type: {type(memory_create.infer)})")
     
     if not any([memory_create.user_id, memory_create.agent_id, memory_create.run_id]):
