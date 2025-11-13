@@ -10,7 +10,13 @@ from pydantic import BaseModel, Field
 
 from mem0 import Memory
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    handlers=[
+        logging.StreamHandler()  # Ensures logs go to stdout (captured by systemd)
+    ]
+)
 
 # Load environment variables
 load_dotenv()
