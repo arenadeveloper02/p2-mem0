@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 from typing import Any, Dict, List, Optional
@@ -160,11 +161,27 @@ class LoggingMiddleware(BaseHTTPMiddleware):
         
         try:
             response = await call_next(request)
+            
+            # Log response details including headers
+            response_headers = dict(response.headers) if hasattr(response, 'headers') else {}
+            content_type = response_headers.get('content-type', 'unknown')
+            content_length = response_headers.get('content-length', 'unknown')
+            
             logging.info(
                 f"Response: {request.method} {request.url.path} | "
                 f"Status: {response.status_code} | "
-                f"Client IP: {client_ip}"
+                f"Client IP: {client_ip} | "
+                f"Content-Type: {content_type} | "
+                f"Content-Length: {content_length}"
             )
+            
+            # If status is not 200, log warning
+            if response.status_code != 200:
+                logging.warning(
+                    f"Non-200 response detected: {response.status_code} for {request.method} {request.url.path} | "
+                    f"Client IP: {client_ip}"
+                )
+            
             return response
         except Exception as e:
             logging.error(
@@ -256,7 +273,19 @@ def add_memory(request: Request, memory_create: MemoryCreate):
         response = MEMORY_INSTANCE.add(messages=[m.model_dump() for m in memory_create.messages], **params)
         results_count = len(response.get('results', [])) if isinstance(response, dict) else 0
         logging.info(f"Memory add completed. Stored {results_count} memories. Response keys: {list(response.keys()) if isinstance(response, dict) else 'N/A'}")
-        return JSONResponse(content=response)
+        
+        # Create JSONResponse with explicit status code
+        json_response = JSONResponse(content=response, status_code=200)
+        
+        # Log response details for debugging
+        response_str = json.dumps(response) if isinstance(response, dict) else str(response)
+        response_size = len(response_str.encode('utf-8'))
+        logging.info(
+            f"Returning response: Status=200, Size={response_size} bytes, "
+            f"Content-Type=application/json, Results={results_count}"
+        )
+        
+        return json_response
     except Exception as e:
         logging.exception("Error in add_memory:")  # This will log the full traceback
         raise HTTPException(status_code=500, detail=str(e))
@@ -373,6 +402,15 @@ def reset_memory():
     except Exception as e:
         logging.exception("Error in reset_memory:")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/health", summary="Health check endpoint")
+def health_check():
+    """Simple health check endpoint to test connectivity."""
+    return JSONResponse(
+        content={"status": "healthy", "message": "API is running"},
+        status_code=200
+    )
 
 
 @app.get("/", summary="Redirect to the OpenAPI documentation", include_in_schema=False)
