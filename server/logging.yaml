@@ -1,0 +1,28 @@
+version: 1
+formatters:
+  default:
+    format: "%(asctime)s - %(levelname)s - %(name)s: %(message)s"
+
+handlers:
+  console:
+    class: logging.StreamHandler
+    formatter: default
+    stream: ext://sys.stdout
+
+root:
+  level: INFO
+  handlers: [console]
+
+loggers:
+  uvicorn.error:
+    level: INFO
+    handlers: [console]
+    propagate: no
+  uvicorn.access:
+    level: INFO
+    handlers: [console]
+    propagate: no
+  mem0-api:
+    level: INFO
+    handlers: [console]
+    propagate: no
