@@ -139,6 +139,30 @@ app = FastAPI(
     root_path="/mem",
 )
 
+# Middleware to strip /mem prefix from request paths
+class PathPrefixMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        # Strip /mem prefix if present
+        original_path = request.url.path
+        if original_path.startswith("/mem/"):
+            # Rewrite the path by removing /mem prefix
+            new_path = original_path[4:]  # Remove "/mem" (4 characters)
+        elif original_path == "/mem":
+            new_path = "/"
+        else:
+            new_path = original_path
+        
+        # Only modify if path changed
+        if new_path != original_path:
+            # Create a new request with modified path
+            scope = dict(request.scope)
+            scope["path"] = new_path
+            scope["raw_path"] = new_path.encode()
+            # Create new request with modified scope
+            request = Request(scope, request.receive)
+        return await call_next(request)
+
+
 # Add middleware to log all requests with client IP
 class LoggingMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
@@ -195,7 +219,10 @@ class LoggingMiddleware(BaseHTTPMiddleware):
 # Needed to respect X-Forwarded headers from AWS ALB
 # app.add_middleware(ProxyHeadersMiddleware, trusted_hosts="*")
 
-# Add logging middleware first
+# Add path prefix middleware first (strips /mem prefix)
+# Note: Middleware executes in reverse order, so this will run first
+app.add_middleware(PathPrefixMiddleware)
+# Add logging middleware
 app.add_middleware(LoggingMiddleware)
 
 # Add CORS middleware to handle cross-origin requests
