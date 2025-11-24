@@ -191,6 +191,9 @@ class LoggingMiddleware(BaseHTTPMiddleware):
             )
             raise
 
+# Needed to respect X-Forwarded headers from AWS ALB
+app.add_middleware(ProxyHeadersMiddleware, trusted_hosts="*")
+
 # Add logging middleware first
 app.add_middleware(LoggingMiddleware)
 
