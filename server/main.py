@@ -144,6 +144,8 @@ class PathPrefixMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         # Strip /mem prefix if present
         original_path = request.url.path
+        original_method = request.method
+        
         if original_path.startswith("/mem/"):
             # Rewrite the path by removing /mem prefix
             new_path = original_path[4:]  # Remove "/mem" (4 characters)
@@ -152,14 +154,18 @@ class PathPrefixMiddleware(BaseHTTPMiddleware):
         else:
             new_path = original_path
         
-        # Only modify if path changed
+        # Log path rewriting for debugging
         if new_path != original_path:
+            logging.info(f"PathPrefixMiddleware: Rewriting {original_method} {original_path} -> {new_path}")
             # Create a new request with modified path
             scope = dict(request.scope)
             scope["path"] = new_path
             scope["raw_path"] = new_path.encode()
             # Create new request with modified scope
             request = Request(scope, request.receive)
+        else:
+            logging.info(f"PathPrefixMiddleware: No rewrite needed for {original_method} {original_path}")
+        
         return await call_next(request)
 
 
