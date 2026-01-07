@@ -22,15 +22,16 @@ logging.basicConfig(
 load_dotenv()
 
 
-# Milvus Configuration
-MILVUS_HOST = os.environ.get("MILVUS_HOST", "milvus")
-MILVUS_PORT = os.environ.get("MILVUS_PORT", "19530")
-MILVUS_URL = os.environ.get("MILVUS_URL", f"http://{MILVUS_HOST}:{MILVUS_PORT}")
-MILVUS_TOKEN = os.environ.get("MILVUS_TOKEN", "")  # Empty for local setup, required for Zilliz Cloud
-MILVUS_COLLECTION_NAME = os.environ.get("MILVUS_COLLECTION_NAME", "memories")
-MILVUS_DB_NAME = os.environ.get("MILVUS_DB_NAME", "")
-MILVUS_EMBEDDING_DIMS = int(os.environ.get("MILVUS_EMBEDDING_DIMS", "1536"))  # text-embedding-3-small dimensions
-MILVUS_METRIC_TYPE = os.environ.get("MILVUS_METRIC_TYPE", "COSINE")  # COSINE, L2, or IP
+# Postgres Configuration (pgvector)
+POSTGRES_HOST = os.environ.get("POSTGRES_HOST", "postgres")
+POSTGRES_PORT = int(os.environ.get("POSTGRES_PORT", "5432"))
+POSTGRES_USER = os.environ.get("POSTGRES_USER", "postgres")
+POSTGRES_PASSWORD = os.environ.get("POSTGRES_PASSWORD", "postgres")
+POSTGRES_DBNAME = os.environ.get("POSTGRES_DBNAME", "postgres")
+POSTGRES_COLLECTION_NAME = os.environ.get("POSTGRES_COLLECTION_NAME", "memories")
+POSTGRES_EMBEDDING_DIMS = int(os.environ.get("POSTGRES_EMBEDDING_DIMS", "1536"))  # text-embedding-3-small dimensions
+POSTGRES_SSLMODE = os.environ.get("POSTGRES_SSLMODE", None)  # Optional: 'require', 'prefer', 'disable', etc.
+POSTGRES_CONNECTION_STRING = os.environ.get("POSTGRES_CONNECTION_STRING", None)  # Optional: full connection string
 
 # Neo4j Configuration (for graph store - optional)
 # Check if Neo4j should be enabled (via environment variable)
@@ -95,14 +96,20 @@ else:
 DEFAULT_CONFIG = {
     "version": "v1.1",
     "vector_store": {
-        "provider": "milvus",
+        "provider": "pgvector",
         "config": {
-            "url": MILVUS_URL,
-            "token": MILVUS_TOKEN,
-            "collection_name": MILVUS_COLLECTION_NAME,
-            "embedding_model_dims": MILVUS_EMBEDDING_DIMS,
-            "metric_type": MILVUS_METRIC_TYPE,
-            "db_name": MILVUS_DB_NAME,
+            "host": POSTGRES_HOST,
+            "port": POSTGRES_PORT,
+            "user": POSTGRES_USER,
+            "password": POSTGRES_PASSWORD,
+            "dbname": POSTGRES_DBNAME,
+            "collection_name": POSTGRES_COLLECTION_NAME,
+            "embedding_model_dims": POSTGRES_EMBEDDING_DIMS,
+            "hnsw": True,  # Use HNSW indexing for faster search
+            "diskann": False,  # Optional: requires pgvectorscale extension
+            "sslmode": POSTGRES_SSLMODE,  # Optional SSL mode
+            # Alternative: use connection_string instead of individual params
+            # "connection_string": POSTGRES_CONNECTION_STRING,
         },
     },
     "llm": {"provider": "openai", "config": {"api_key": OPENAI_API_KEY, "temperature": 0.2, "model": "gpt-4.1-nano-2025-04-14"}},
