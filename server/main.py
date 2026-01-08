@@ -251,6 +251,95 @@ def get_all_memories(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/memories/original-prompt", summary="Get original prompt data instead of chunked data")
+def get_original_prompt_memories(
+    user_id: Optional[str] = None,
+    run_id: Optional[str] = None,
+    agent_id: Optional[str] = None,
+):
+    """
+    Retrieve memories with original prompt data instead of chunked data.
+    For chunked memories, returns the full original content from memory_chunk_mapping table.
+    For non-chunked memories, returns them as-is.
+    """
+    if not any([user_id, run_id, agent_id]):
+        raise HTTPException(status_code=400, detail="At least one identifier is required.")
+    try:
+        params = {
+            k: v for k, v in {"user_id": user_id, "run_id": run_id, "agent_id": agent_id}.items() if v is not None
+        }
+        logging.info(f"Retrieving original prompt memories with filters: {params}")
+        
+        # Get all memories (including chunks)
+        result = MEMORY_INSTANCE.get_all(**params)
+        memories = result.get("results", [])
+        
+        # Process memories to replace chunks with original content
+        processed_memories = []
+        seen_original_message_ids = set()
+        
+        for mem in memories:
+            metadata = mem.get("metadata", {})
+            is_chunk = metadata.get("is_chunk", False)
+            original_message_id = metadata.get("original_message_id")
+            original_content_memory_id = metadata.get("original_content_memory_id")
+            
+            if is_chunk and original_message_id and original_content_memory_id:
+                # Skip if we've already processed this original message
+                if original_message_id in seen_original_message_ids:
+                    continue
+                
+                # Mark as seen
+                seen_original_message_ids.add(original_message_id)
+                
+                # Fetch original content from memory_chunk_mapping table
+                try:
+                    mapping_data = MEMORY_INSTANCE.db.get_chunk_mapping(original_content_memory_id)
+                    if mapping_data:
+                        # Create a new memory entry with original content
+                        original_memory = {
+                            "id": original_message_id,  # Use original_message_id as the ID
+                            "memory": mapping_data["original_content"],
+                            "hash": None,  # Original content hash (could be computed if needed)
+                            "created_at": mapping_data.get("created_at"),
+                            "updated_at": None,
+                            "user_id": mem.get("user_id"),
+                            "agent_id": mem.get("agent_id"),
+                            "run_id": mem.get("run_id"),
+                            "actor_id": mem.get("actor_id"),
+                            "role": mem.get("role"),
+                            "metadata": {
+                                "is_original_content": True,
+                                "original_content_memory_id": original_content_memory_id,
+                                "original_token_count": mapping_data.get("original_token_count"),
+                                "total_chunks": mapping_data.get("total_chunks"),
+                            }
+                        }
+                        processed_memories.append(original_memory)
+                    else:
+                        # If mapping not found, log warning and skip
+                        logging.warning(f"Original content mapping not found for ID: {original_content_memory_id}")
+                except Exception as e:
+                    logging.warning(f"Error fetching original content for mapping ID {original_content_memory_id}: {e}")
+                    # Continue with next memory
+                    continue
+            else:
+                # Non-chunked memory, add as-is
+                processed_memories.append(mem)
+        
+        logging.info(f"Retrieved {len(processed_memories)} original prompt memories (from {len(memories)} total memories)")
+        
+        # Return in same format as get_all
+        response = {"results": processed_memories}
+        if "relations" in result:
+            response["relations"] = result["relations"]
+        
+        return response
+    except Exception as e:
+        logging.exception("Error in get_original_prompt_memories:")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/memories/{memory_id}", summary="Get a memory")
 def get_memory(memory_id: str):
     """Retrieve a specific memory by ID."""
