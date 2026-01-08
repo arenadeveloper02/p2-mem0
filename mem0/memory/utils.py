@@ -1,11 +1,21 @@
 import hashlib
+import logging
 import re
+from typing import Any, Dict, List, Optional
+
+try:
+    import tiktoken
+    TIKTOKEN_AVAILABLE = True
+except ImportError:
+    TIKTOKEN_AVAILABLE = False
 
 from mem0.configs.prompts import (
     FACT_RETRIEVAL_PROMPT,
     USER_MEMORY_EXTRACTION_PROMPT,
     AGENT_MEMORY_EXTRACTION_PROMPT,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def get_fact_retrieval_messages(message, is_agent_memory=False):
@@ -205,4 +215,220 @@ def sanitize_relationship_for_cypher(relationship) -> str:
         sanitized = sanitized.replace(old, new)
 
     return re.sub(r"_+", "_", sanitized).strip("_")
+
+
+def count_tokens(text: str, model: str = "text-embedding-3-small") -> int:
+    """
+    Count tokens in text using tiktoken for accurate counting.
+    Falls back to character-based estimation if tiktoken is unavailable.
+    
+    Args:
+        text: The text to count tokens for
+        model: The model name to use for tokenization (default: text-embedding-3-small)
+        
+    Returns:
+        int: Estimated token count
+    """
+    if not text:
+        return 0
+    
+    if TIKTOKEN_AVAILABLE:
+        try:
+            # Use cl100k_base encoding which is used by text-embedding-3-small and similar models
+            encoding = tiktoken.get_encoding("cl100k_base")
+            return len(encoding.encode(text))
+        except Exception as e:
+            logger.warning(f"Failed to count tokens with tiktoken: {e}. Falling back to character-based estimation.")
+    
+    # Fallback: approximate 1 token ≈ 4 characters
+    return len(text) // 4
+
+
+def chunk_text_intelligently(
+    text: str,
+    max_tokens: int = 1024,
+    overlap_tokens: int = 200,
+    min_chunk_size_chars: int = 100,
+) -> List[Dict[str, Any]]:
+    """
+    Chunk text intelligently preserving sentence boundaries with token-aware splitting.
+    
+    Args:
+        text: The text to chunk
+        max_tokens: Maximum tokens per chunk (default: 1024)
+        overlap_tokens: Number of tokens to overlap between chunks (default: 200)
+        min_chunk_size_chars: Minimum chunk size in characters (default: 100)
+        
+    Returns:
+        List of dictionaries containing:
+            - text: The chunk text
+            - start_pos: Starting character position in original text
+            - end_pos: Ending character position in original text
+            - token_count: Token count for this chunk
+    """
+    if not text:
+        return []
+    
+    # Convert token limits to character estimates for initial splitting
+    # 1 token ≈ 4 characters, but we'll be more conservative
+    max_chars_per_chunk = max_tokens * 4
+    overlap_chars = overlap_tokens * 4
+    
+    # If text is small enough, return as single chunk
+    estimated_tokens = count_tokens(text)
+    if estimated_tokens <= max_tokens:
+        return [{
+            "text": text,
+            "start_pos": 0,
+            "end_pos": len(text),
+            "token_count": estimated_tokens
+        }]
+    
+    chunks = []
+    current_pos = 0
+    text_length = len(text)
+    
+    # Sentence boundary patterns (period, exclamation, question mark, followed by space or newline)
+    sentence_endings = re.compile(r'[.!?]+(?:\s+|$)')
+    
+    while current_pos < text_length:
+        # Calculate the end position for this chunk
+        chunk_end = min(current_pos + max_chars_per_chunk, text_length)
+        
+        # If we're not at the end of the text, try to find a sentence boundary
+        if chunk_end < text_length:
+            # Look for sentence endings in the last 20% of the chunk
+            search_start = max(current_pos, chunk_end - int(max_chars_per_chunk * 0.2))
+            search_text = text[search_start:chunk_end]
+            
+            matches = list(sentence_endings.finditer(search_text))
+            if matches:
+                # Use the last sentence boundary found
+                last_match = matches[-1]
+                chunk_end = search_start + last_match.end()
+        
+        # Extract the chunk
+        chunk_text = text[current_pos:chunk_end].strip()
+        
+        # Skip if chunk is too small (unless it's the last chunk)
+        if len(chunk_text) < min_chunk_size_chars and chunk_end < text_length:
+            # Try to extend to next sentence boundary
+            remaining_text = text[chunk_end:]
+            next_sentence_match = sentence_endings.search(remaining_text)
+            if next_sentence_match:
+                chunk_end = chunk_end + next_sentence_match.end()
+                chunk_text = text[current_pos:chunk_end].strip()
+            else:
+                # If no sentence boundary found, just take the minimum size
+                chunk_end = min(current_pos + min_chunk_size_chars, text_length)
+                chunk_text = text[current_pos:chunk_end].strip()
+        
+        # Count tokens for this chunk
+        chunk_tokens = count_tokens(chunk_text)
+        
+        # If chunk exceeds max_tokens, we need to split more aggressively
+        if chunk_tokens > max_tokens:
+            # Split by sentences more aggressively
+            sentences = sentence_endings.split(chunk_text)
+            current_sentence_pos = current_pos
+            current_sentence_chunk = ""
+            current_sentence_tokens = 0
+            
+            for sentence in sentences:
+                if not sentence.strip():
+                    continue
+                    
+                sentence_text = sentence.strip()
+                sentence_tokens = count_tokens(sentence_text)
+                
+                # If adding this sentence would exceed max_tokens, save current chunk and start new one
+                if current_sentence_tokens + sentence_tokens > max_tokens and current_sentence_chunk:
+                    chunks.append({
+                        "text": current_sentence_chunk.strip(),
+                        "start_pos": current_sentence_pos,
+                        "end_pos": current_sentence_pos + len(current_sentence_chunk),
+                        "token_count": current_sentence_tokens
+                    })
+                    current_sentence_pos = current_sentence_pos + len(current_sentence_chunk)
+                    current_sentence_chunk = sentence_text
+                    current_sentence_tokens = sentence_tokens
+                else:
+                    current_sentence_chunk += (" " + sentence_text if current_sentence_chunk else sentence_text)
+                    current_sentence_tokens += sentence_tokens
+            
+            # Add the last sentence chunk
+            if current_sentence_chunk:
+                chunks.append({
+                    "text": current_sentence_chunk.strip(),
+                    "start_pos": current_sentence_pos,
+                    "end_pos": current_sentence_pos + len(current_sentence_chunk),
+                    "token_count": current_sentence_tokens
+                })
+            
+            # Move position forward, accounting for overlap
+            if overlap_tokens > 0 and chunk_end < text_length:
+                # Find overlap position (go back by overlap_tokens worth of characters)
+                overlap_chars = min(overlap_chars, len(chunk_text) // 2)  # Don't overlap more than half
+                # Try to find a sentence boundary in the overlap region
+                overlap_start = chunk_end - overlap_chars
+                overlap_text = text[overlap_start:chunk_end]
+                overlap_matches = list(sentence_endings.finditer(overlap_text))
+                if overlap_matches:
+                    overlap_pos = overlap_start + overlap_matches[-1].end()
+                else:
+                    overlap_pos = overlap_start
+                current_pos = max(current_pos + 1, overlap_pos)
+            else:
+                current_pos = chunk_end
+        else:
+            # Chunk is within token limit, add it
+            chunks.append({
+                "text": chunk_text,
+                "start_pos": current_pos,
+                "end_pos": chunk_end,
+                "token_count": chunk_tokens
+            })
+            
+            # Move position forward, accounting for overlap
+            if overlap_tokens > 0 and chunk_end < text_length:
+                # Find overlap position
+                overlap_chars = min(overlap_chars, len(chunk_text) // 2)
+                overlap_start = chunk_end - overlap_chars
+                overlap_text = text[overlap_start:chunk_end]
+                overlap_matches = list(sentence_endings.finditer(overlap_text))
+                if overlap_matches:
+                    overlap_pos = overlap_start + overlap_matches[-1].end()
+                else:
+                    overlap_pos = overlap_start
+                current_pos = max(current_pos + 1, overlap_pos)
+            else:
+                current_pos = chunk_end
+    
+    # Filter out empty chunks and ensure minimum size
+    final_chunks = []
+    for chunk in chunks:
+        if chunk["text"] and len(chunk["text"]) >= min_chunk_size_chars:
+            final_chunks.append(chunk)
+        elif chunk["text"] and len(final_chunks) > 0:
+            # Merge small chunk with previous one if possible
+            prev_chunk = final_chunks[-1]
+            combined_text = prev_chunk["text"] + " " + chunk["text"]
+            combined_tokens = count_tokens(combined_text)
+            if combined_tokens <= max_tokens:
+                final_chunks[-1] = {
+                    "text": combined_text,
+                    "start_pos": prev_chunk["start_pos"],
+                    "end_pos": chunk["end_pos"],
+                    "token_count": combined_tokens
+                }
+            else:
+                # Can't merge, add as separate chunk (even if small)
+                final_chunks.append(chunk)
+    
+    return final_chunks if final_chunks else [{
+        "text": text,
+        "start_pos": 0,
+        "end_pos": len(text),
+        "token_count": count_tokens(text)
+    }]
 

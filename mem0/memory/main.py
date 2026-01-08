@@ -26,6 +26,8 @@ from mem0.memory.setup import mem0_dir, setup_config
 from mem0.memory.storage import SQLiteManager
 from mem0.memory.telemetry import capture_event
 from mem0.memory.utils import (
+    chunk_text_intelligently,
+    count_tokens,
     extract_json,
     get_fact_retrieval_messages,
     parse_messages,
@@ -406,18 +408,92 @@ class Memory(MemoryBase):
                     per_msg_meta["actor_id"] = actor_name
 
                 msg_content = message_dict["content"]
-                msg_embeddings = self.embedding_model.embed(msg_content, "add")
-                mem_id = self._create_memory(msg_content, msg_embeddings, per_msg_meta)
+                
+                # Get chunking configuration from embedder config
+                embedder_config = self.config.embedder.config
+                if isinstance(embedder_config, dict):
+                    max_input_tokens = embedder_config.get("max_input_tokens", 8191)
+                    chunk_size_tokens = embedder_config.get("chunk_size_tokens", 1024)
+                    chunk_overlap_tokens = embedder_config.get("chunk_overlap_tokens", 200)
+                    min_chunk_size_chars = embedder_config.get("min_chunk_size_chars", 100)
+                    enable_chunking = embedder_config.get("enable_chunking", True)
+                else:
+                    max_input_tokens = getattr(embedder_config, "max_input_tokens", 8191)
+                    chunk_size_tokens = getattr(embedder_config, "chunk_size_tokens", 1024)
+                    chunk_overlap_tokens = getattr(embedder_config, "chunk_overlap_tokens", 200)
+                    min_chunk_size_chars = getattr(embedder_config, "min_chunk_size_chars", 100)
+                    enable_chunking = getattr(embedder_config, "enable_chunking", True)
+                
+                # Check if content exceeds token limit and needs chunking
+                estimated_tokens = count_tokens(msg_content)
+                needs_chunking = enable_chunking and estimated_tokens > max_input_tokens
+                
+                if needs_chunking:
+                    # Generate original message ID for linking chunks
+                    original_message_id = str(uuid.uuid4())
+                    
+                    # Store full original content in metadata
+                    per_msg_meta["original_content"] = msg_content
+                    per_msg_meta["original_message_id"] = original_message_id
+                    per_msg_meta["original_token_count"] = estimated_tokens
+                    
+                    # Chunk the content
+                    chunks = chunk_text_intelligently(
+                        msg_content,
+                        max_tokens=chunk_size_tokens,
+                        overlap_tokens=chunk_overlap_tokens,
+                        min_chunk_size_chars=min_chunk_size_chars,
+                    )
+                    
+                    logger.info(
+                        f"Chunking message of {estimated_tokens} tokens into {len(chunks)} chunks "
+                        f"(max_tokens={chunk_size_tokens}, overlap={chunk_overlap_tokens})"
+                    )
+                    
+                    # Process each chunk
+                    for chunk_index, chunk_data in enumerate(chunks):
+                        chunk_meta = deepcopy(per_msg_meta)
+                        chunk_meta["chunk_index"] = chunk_index
+                        chunk_meta["total_chunks"] = len(chunks)
+                        chunk_meta["is_chunk"] = True
+                        chunk_meta["chunk_start_char"] = chunk_data["start_pos"]
+                        chunk_meta["chunk_end_char"] = chunk_data["end_pos"]
+                        chunk_meta["chunk_token_count"] = chunk_data["token_count"]
+                        
+                        # Embed chunk
+                        chunk_embeddings = self.embedding_model.embed(chunk_data["text"], "add")
+                        
+                        # Store chunk
+                        mem_id = self._create_memory(
+                            chunk_data["text"],
+                            {chunk_data["text"]: chunk_embeddings},
+                            chunk_meta
+                        )
+                        
+                        returned_memories.append({
+                            "id": mem_id,
+                            "memory": chunk_data["text"],
+                            "event": "ADD",
+                            "actor_id": actor_name if actor_name else None,
+                            "role": message_dict["role"],
+                            "chunk_index": chunk_index,
+                            "total_chunks": len(chunks),
+                            "original_message_id": original_message_id,
+                        })
+                else:
+                    # Content is within token limit, process normally
+                    msg_embeddings = self.embedding_model.embed(msg_content, "add")
+                    mem_id = self._create_memory(msg_content, {msg_content: msg_embeddings}, per_msg_meta)
 
-                returned_memories.append(
-                    {
-                        "id": mem_id,
-                        "memory": msg_content,
-                        "event": "ADD",
-                        "actor_id": actor_name if actor_name else None,
-                        "role": message_dict["role"],
-                    }
-                )
+                    returned_memories.append(
+                        {
+                            "id": mem_id,
+                            "memory": msg_content,
+                            "event": "ADD",
+                            "actor_id": actor_name if actor_name else None,
+                            "role": message_dict["role"],
+                        }
+                    )
             return returned_memories
 
         parsed_messages = parse_messages(messages)
@@ -1436,18 +1512,95 @@ class AsyncMemory(MemoryBase):
                     per_msg_meta["actor_id"] = actor_name
 
                 msg_content = message_dict["content"]
-                msg_embeddings = await asyncio.to_thread(self.embedding_model.embed, msg_content, "add")
-                mem_id = await self._create_memory(msg_content, msg_embeddings, per_msg_meta)
+                
+                # Get chunking configuration from embedder config
+                embedder_config = self.config.embedder.config
+                if isinstance(embedder_config, dict):
+                    max_input_tokens = embedder_config.get("max_input_tokens", 8191)
+                    chunk_size_tokens = embedder_config.get("chunk_size_tokens", 1024)
+                    chunk_overlap_tokens = embedder_config.get("chunk_overlap_tokens", 200)
+                    min_chunk_size_chars = embedder_config.get("min_chunk_size_chars", 100)
+                    enable_chunking = embedder_config.get("enable_chunking", True)
+                else:
+                    max_input_tokens = getattr(embedder_config, "max_input_tokens", 8191)
+                    chunk_size_tokens = getattr(embedder_config, "chunk_size_tokens", 1024)
+                    chunk_overlap_tokens = getattr(embedder_config, "chunk_overlap_tokens", 200)
+                    min_chunk_size_chars = getattr(embedder_config, "min_chunk_size_chars", 100)
+                    enable_chunking = getattr(embedder_config, "enable_chunking", True)
+                
+                # Check if content exceeds token limit and needs chunking
+                estimated_tokens = await asyncio.to_thread(count_tokens, msg_content)
+                needs_chunking = enable_chunking and estimated_tokens > max_input_tokens
+                
+                if needs_chunking:
+                    # Generate original message ID for linking chunks
+                    original_message_id = str(uuid.uuid4())
+                    
+                    # Store full original content in metadata
+                    per_msg_meta["original_content"] = msg_content
+                    per_msg_meta["original_message_id"] = original_message_id
+                    per_msg_meta["original_token_count"] = estimated_tokens
+                    
+                    # Chunk the content
+                    chunks = await asyncio.to_thread(
+                        chunk_text_intelligently,
+                        msg_content,
+                        max_tokens=chunk_size_tokens,
+                        overlap_tokens=chunk_overlap_tokens,
+                        min_chunk_size_chars=min_chunk_size_chars,
+                    )
+                    
+                    logger.info(
+                        f"Chunking message of {estimated_tokens} tokens into {len(chunks)} chunks "
+                        f"(max_tokens={chunk_size_tokens}, overlap={chunk_overlap_tokens})"
+                    )
+                    
+                    # Process each chunk
+                    for chunk_index, chunk_data in enumerate(chunks):
+                        chunk_meta = deepcopy(per_msg_meta)
+                        chunk_meta["chunk_index"] = chunk_index
+                        chunk_meta["total_chunks"] = len(chunks)
+                        chunk_meta["is_chunk"] = True
+                        chunk_meta["chunk_start_char"] = chunk_data["start_pos"]
+                        chunk_meta["chunk_end_char"] = chunk_data["end_pos"]
+                        chunk_meta["chunk_token_count"] = chunk_data["token_count"]
+                        
+                        # Embed chunk
+                        chunk_embeddings = await asyncio.to_thread(
+                            self.embedding_model.embed, chunk_data["text"], "add"
+                        )
+                        
+                        # Store chunk
+                        mem_id = await self._create_memory(
+                            chunk_data["text"],
+                            {chunk_data["text"]: chunk_embeddings},
+                            chunk_meta
+                        )
+                        
+                        returned_memories.append({
+                            "id": mem_id,
+                            "memory": chunk_data["text"],
+                            "event": "ADD",
+                            "actor_id": actor_name if actor_name else None,
+                            "role": message_dict["role"],
+                            "chunk_index": chunk_index,
+                            "total_chunks": len(chunks),
+                            "original_message_id": original_message_id,
+                        })
+                else:
+                    # Content is within token limit, process normally
+                    msg_embeddings = await asyncio.to_thread(self.embedding_model.embed, msg_content, "add")
+                    mem_id = await self._create_memory(msg_content, {msg_content: msg_embeddings}, per_msg_meta)
 
-                returned_memories.append(
-                    {
-                        "id": mem_id,
-                        "memory": msg_content,
-                        "event": "ADD",
-                        "actor_id": actor_name if actor_name else None,
-                        "role": message_dict["role"],
-                    }
-                )
+                    returned_memories.append(
+                        {
+                            "id": mem_id,
+                            "memory": msg_content,
+                            "event": "ADD",
+                            "actor_id": actor_name if actor_name else None,
+                            "role": message_dict["role"],
+                        }
+                    )
             return returned_memories
 
         parsed_messages = parse_messages(messages)

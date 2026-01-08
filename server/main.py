@@ -113,7 +113,18 @@ DEFAULT_CONFIG = {
         },
     },
     "llm": {"provider": "openai", "config": {"api_key": OPENAI_API_KEY, "temperature": 0.2, "model": "gpt-4.1-nano-2025-04-14"}},
-    "embedder": {"provider": "openai", "config": {"api_key": OPENAI_API_KEY, "model": "text-embedding-3-small"}},
+    "embedder": {
+        "provider": "openai",
+        "config": {
+            "api_key": OPENAI_API_KEY,
+            "model": "text-embedding-3-small",
+            "max_input_tokens": 8191,
+            "chunk_size_tokens": 1024,
+            "chunk_overlap_tokens": 200,
+            "min_chunk_size_chars": 100,
+            "enable_chunking": True,
+        },
+    },
     "history_db_path": HISTORY_DB_PATH,
 }
 
