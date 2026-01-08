@@ -152,7 +152,7 @@ app = FastAPI(
     title="Mem0 REST APIs",
     description="A REST API for managing and searching memories for your AI Agents and Apps.",
     version="1.0.0",
-    root_path="/mem",
+
 )
 
 # Add CORS middleware to handle cross-origin requests
