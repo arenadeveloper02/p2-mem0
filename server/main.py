@@ -431,6 +431,17 @@ def reset_memory():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/health", summary="Health check endpoint")
+def health_check():
+    """Health check endpoint for monitoring and load balancers."""
+    try:
+        # Basic health check - can be extended to check database connections, etc.
+        return {"status": "healthy", "service": "mem0-api"}
+    except Exception as e:
+        logging.exception("Error in health_check:")
+        raise HTTPException(status_code=503, detail="Service unhealthy")
+
+
 @app.get("/", summary="Redirect to the OpenAPI documentation", include_in_schema=False)
 def home():
     """Redirect to the OpenAPI documentation."""
