@@ -184,6 +184,7 @@ class SearchRequest(BaseModel):
     run_id: Optional[str] = None
     agent_id: Optional[str] = None
     filters: Optional[Dict[str, Any]] = None
+    limit: Optional[int] = Field(default=100, description="Maximum number of results to return. Defaults to 100.")
 
 
 @app.post("/configure", summary="Configure Mem0")
