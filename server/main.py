@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 from typing import Any, Dict, List, Optional
@@ -6,6 +7,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
 from pydantic import BaseModel, Field
 
 from mem0 import Memory
@@ -152,8 +154,100 @@ app = FastAPI(
     title="Mem0 REST APIs",
     description="A REST API for managing and searching memories for your AI Agents and Apps.",
     version="1.0.0",
-
+    root_path="/mem",
 )
+
+# Middleware to strip /mem prefix from request paths
+class PathPrefixMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        # Strip /mem prefix if present
+        original_path = request.url.path
+        original_method = request.method
+        
+        if original_path.startswith("/mem/"):
+            # Rewrite the path by removing /mem prefix
+            new_path = original_path[4:]  # Remove "/mem" (4 characters)
+        elif original_path == "/mem":
+            new_path = "/"
+        else:
+            new_path = original_path
+        
+        # Log path rewriting for debugging
+        if new_path != original_path:
+            logging.info(f"PathPrefixMiddleware: Rewriting {original_method} {original_path} -> {new_path}")
+            # Create a new request with modified path
+            scope = dict(request.scope)
+            scope["path"] = new_path
+            scope["raw_path"] = new_path.encode()
+            # Create new request with modified scope
+            request = Request(scope, request.receive)
+        else:
+            logging.info(f"PathPrefixMiddleware: No rewrite needed for {original_method} {original_path}")
+        
+        return await call_next(request)
+
+
+# Add middleware to log all requests with client IP
+class LoggingMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        # Get client IP address
+        client_ip = request.client.host if request.client else "unknown"
+        # Check for forwarded IP (in case behind proxy)
+        forwarded_for = request.headers.get("X-Forwarded-For")
+        real_ip = request.headers.get("X-Real-IP")
+        if forwarded_for:
+            client_ip = forwarded_for.split(",")[0].strip()
+        elif real_ip:
+            client_ip = real_ip
+        
+        # Log request details
+        logging.info(
+            f"Request: {request.method} {request.url.path} | "
+            f"Client IP: {client_ip} | "
+            f"User-Agent: {request.headers.get('user-agent', 'unknown')} | "
+            f"Origin: {request.headers.get('origin', 'unknown')}"
+        )
+        
+        try:
+            response = await call_next(request)
+            
+            # Log response details including headers
+            response_headers = dict(response.headers) if hasattr(response, 'headers') else {}
+            content_type = response_headers.get('content-type', 'unknown')
+            content_length = response_headers.get('content-length', 'unknown')
+            
+            logging.info(
+                f"Response: {request.method} {request.url.path} | "
+                f"Status: {response.status_code} | "
+                f"Client IP: {client_ip} | "
+                f"Content-Type: {content_type} | "
+                f"Content-Length: {content_length}"
+            )
+            
+            # If status is not 200, log warning
+            if response.status_code != 200:
+                logging.warning(
+                    f"Non-200 response detected: {response.status_code} for {request.method} {request.url.path} | "
+                    f"Client IP: {client_ip}"
+                )
+            
+            return response
+        except Exception as e:
+            logging.error(
+                f"Error processing request: {request.method} {request.url.path} | "
+                f"Client IP: {client_ip} | "
+                f"Error: {str(e)}"
+            )
+            raise
+
+# Needed to respect X-Forwarded headers from AWS ALB
+# app.add_middleware(ProxyHeadersMiddleware, trusted_hosts="*")
+
+# Add path prefix middleware first (strips /mem prefix)
+# Note: Middleware executes in reverse order, so this will run first
+app.add_middleware(PathPrefixMiddleware)
+# Add logging middleware
+app.add_middleware(LoggingMiddleware)
 
 # Add CORS middleware to handle cross-origin requests
 app.add_middleware(
@@ -199,8 +293,18 @@ def set_config(config: Dict[str, Any]):
 @app.post("/memories", summary="Create memories")
 def add_memory(request: Request, memory_create: MemoryCreate):
     """Store new memories."""
+    # Get client IP for detailed logging
+    client_ip = request.client.host if request.client else "unknown"
+    forwarded_for = request.headers.get("X-Forwarded-For")
+    real_ip = request.headers.get("X-Real-IP")
+    if forwarded_for:
+        client_ip = forwarded_for.split(",")[0].strip()
+    elif real_ip:
+        client_ip = real_ip
+    
     # Log request details for debugging
-    logging.info(f"Request headers: {request}")
+    logging.info(f"Request from IP: {client_ip}")
+    logging.info(f"Request headers: {dict(request.headers)}")
     logging.info(f"Received add_memory request: user_id={memory_create.user_id}, agent_id={memory_create.agent_id}, run_id={memory_create.run_id}, messages_count={len(memory_create.messages) if memory_create.messages else 0}, infer={memory_create.infer} (type: {type(memory_create.infer)})")
     
     if not any([memory_create.user_id, memory_create.agent_id, memory_create.run_id]):
@@ -224,8 +328,21 @@ def add_memory(request: Request, memory_create: MemoryCreate):
     try:
         response = MEMORY_INSTANCE.add(messages=[m.model_dump() for m in memory_create.messages], **params)
         results_count = len(response.get('results', [])) if isinstance(response, dict) else 0
-        logging.info(f"Memory add completed. Stored {results_count} memories. Response keys: {list(response.keys()) if isinstance(response, dict) else 'N/A'}")
-        return JSONResponse(content=response)
+        chunked = any(result.get('chunk_index', -1) >= 0 for result in response.get('results', [])) if isinstance(response, dict) else False
+        logging.info(f"Memory add completed. Stored {results_count} memories ({'CHUNKED' if chunked else 'NOT CHUNKED'}). Response keys: {list(response.keys()) if isinstance(response, dict) else 'N/A'}")
+        
+        # Create JSONResponse with explicit status code
+        json_response = JSONResponse(content=response, status_code=200)
+        
+        # Log response details for debugging
+        response_str = json.dumps(response) if isinstance(response, dict) else str(response)
+        response_size = len(response_str.encode('utf-8'))
+        logging.info(
+            f"Returning response: Status=200, Size={response_size} bytes, "
+            f"Content-Type=application/json, Results={results_count}"
+        )
+        
+        return json_response
     except Exception as e:
         logging.exception("Error in add_memory:")  # This will log the full traceback
         raise HTTPException(status_code=500, detail=str(e))
@@ -435,14 +552,11 @@ def reset_memory():
 
 @app.get("/health", summary="Health check endpoint")
 def health_check():
-    """Health check endpoint for monitoring and load balancers."""
-    try:
-        # Basic health check - can be extended to check database connections, etc.
-        return {"status": "healthy", "service": "mem0-api"}
-    except Exception as e:
-        logging.exception("Error in health_check:")
-        raise HTTPException(status_code=503, detail="Service unhealthy")
-
+    """Simple health check endpoint to test connectivity."""
+    return JSONResponse(
+        content={"status": "healthy", "message": "API is running"},
+        status_code=200
+    )
 
 @app.get("/", summary="Redirect to the OpenAPI documentation", include_in_schema=False)
 def home():

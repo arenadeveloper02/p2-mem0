@@ -427,6 +427,7 @@ class Memory(MemoryBase):
                 # Check if content exceeds token limit and needs chunking
                 estimated_tokens = count_tokens(msg_content)
                 needs_chunking = enable_chunking and estimated_tokens > max_input_tokens
+                logger.debug(f"Chunking check: enable_chunking={enable_chunking}, estimated_tokens={estimated_tokens}, max_input_tokens={max_input_tokens}, needs_chunking={needs_chunking}")
                 
                 if needs_chunking:
                     # Generate original message ID for linking chunks
@@ -439,10 +440,10 @@ class Memory(MemoryBase):
                         overlap_tokens=chunk_overlap_tokens,
                         min_chunk_size_chars=min_chunk_size_chars,
                     )
-                    
-                    logger.info(
-                        f"Chunking message of {estimated_tokens} tokens into {len(chunks)} chunks "
-                        f"(max_tokens={chunk_size_tokens}, overlap={chunk_overlap_tokens})"
+
+                    logger.warning(
+                        f"🚀 CHUNKING ACTIVATED: Splitting {estimated_tokens} tokens into {len(chunks)} chunks "
+                        f"(chunk_size={chunk_size_tokens}, overlap={chunk_overlap_tokens})"
                     )
                     
                     # Store original content in memory_chunk_mapping table

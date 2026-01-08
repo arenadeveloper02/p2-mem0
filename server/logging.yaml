@@ -1,13 +1,21 @@
 version: 1
+<<<<<<< HEAD
 disable_existing_loggers: false
 formatters:
   default:
     format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+=======
+formatters:
+  default:
+    format: "%(asctime)s - %(levelname)s - %(name)s: %(message)s"
+
+>>>>>>> 4e069a76c8308ca524eaa9e24856fa39259c7491
 handlers:
   console:
     class: logging.StreamHandler
     formatter: default
     stream: ext://sys.stdout
+<<<<<<< HEAD
 loggers:
   uvicorn:
     level: INFO
@@ -21,3 +29,23 @@ loggers:
 root:
   level: INFO
   handlers: [console]
+=======
+
+root:
+  level: INFO
+  handlers: [console]
+
+loggers:
+  uvicorn.error:
+    level: INFO
+    handlers: [console]
+    propagate: no
+  uvicorn.access:
+    level: INFO
+    handlers: [console]
+    propagate: no
+  mem0-api:
+    level: INFO
+    handlers: [console]
+    propagate: no
+>>>>>>> 4e069a76c8308ca524eaa9e24856fa39259c7491
