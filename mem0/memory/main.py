@@ -432,11 +432,6 @@ class Memory(MemoryBase):
                     # Generate original message ID for linking chunks
                     original_message_id = str(uuid.uuid4())
                     
-                    # Store full original content in metadata
-                    per_msg_meta["original_content"] = msg_content
-                    per_msg_meta["original_message_id"] = original_message_id
-                    per_msg_meta["original_token_count"] = estimated_tokens
-                    
                     # Chunk the content
                     chunks = chunk_text_intelligently(
                         msg_content,
@@ -450,15 +445,29 @@ class Memory(MemoryBase):
                         f"(max_tokens={chunk_size_tokens}, overlap={chunk_overlap_tokens})"
                     )
                     
+                    # Store original content in memory_chunk_mapping table
+                    mapping_id = self.db.add_chunk_mapping(
+                        original_content=msg_content,
+                        original_message_id=original_message_id,
+                        original_token_count=estimated_tokens,
+                        total_chunks=len(chunks),
+                        user_id=metadata.get("user_id"),
+                        agent_id=metadata.get("agent_id"),
+                        run_id=metadata.get("run_id"),
+                    )
+                    
                     # Process each chunk
                     for chunk_index, chunk_data in enumerate(chunks):
                         chunk_meta = deepcopy(per_msg_meta)
+                        chunk_meta["original_message_id"] = original_message_id
+                        chunk_meta["original_content_memory_id"] = mapping_id  # Reference to mapping table
                         chunk_meta["chunk_index"] = chunk_index
                         chunk_meta["total_chunks"] = len(chunks)
                         chunk_meta["is_chunk"] = True
                         chunk_meta["chunk_start_char"] = chunk_data["start_pos"]
                         chunk_meta["chunk_end_char"] = chunk_data["end_pos"]
                         chunk_meta["chunk_token_count"] = chunk_data["token_count"]
+                        # Note: original_content is NOT stored in metadata anymore
                         
                         # Embed chunk
                         chunk_embeddings = self.embedding_model.embed(chunk_data["text"], "add")
@@ -479,6 +488,7 @@ class Memory(MemoryBase):
                             "chunk_index": chunk_index,
                             "total_chunks": len(chunks),
                             "original_message_id": original_message_id,
+                            "original_content_memory_id": mapping_id,
                         })
                 else:
                     # Content is within token limit, process normally
@@ -1536,11 +1546,6 @@ class AsyncMemory(MemoryBase):
                     # Generate original message ID for linking chunks
                     original_message_id = str(uuid.uuid4())
                     
-                    # Store full original content in metadata
-                    per_msg_meta["original_content"] = msg_content
-                    per_msg_meta["original_message_id"] = original_message_id
-                    per_msg_meta["original_token_count"] = estimated_tokens
-                    
                     # Chunk the content
                     chunks = await asyncio.to_thread(
                         chunk_text_intelligently,
@@ -1555,15 +1560,30 @@ class AsyncMemory(MemoryBase):
                         f"(max_tokens={chunk_size_tokens}, overlap={chunk_overlap_tokens})"
                     )
                     
+                    # Store original content in memory_chunk_mapping table
+                    mapping_id = await asyncio.to_thread(
+                        self.db.add_chunk_mapping,
+                        original_content=msg_content,
+                        original_message_id=original_message_id,
+                        original_token_count=estimated_tokens,
+                        total_chunks=len(chunks),
+                        user_id=metadata.get("user_id"),
+                        agent_id=metadata.get("agent_id"),
+                        run_id=metadata.get("run_id"),
+                    )
+                    
                     # Process each chunk
                     for chunk_index, chunk_data in enumerate(chunks):
                         chunk_meta = deepcopy(per_msg_meta)
+                        chunk_meta["original_message_id"] = original_message_id
+                        chunk_meta["original_content_memory_id"] = mapping_id  # Reference to mapping table
                         chunk_meta["chunk_index"] = chunk_index
                         chunk_meta["total_chunks"] = len(chunks)
                         chunk_meta["is_chunk"] = True
                         chunk_meta["chunk_start_char"] = chunk_data["start_pos"]
                         chunk_meta["chunk_end_char"] = chunk_data["end_pos"]
                         chunk_meta["chunk_token_count"] = chunk_data["token_count"]
+                        # Note: original_content is NOT stored in metadata anymore
                         
                         # Embed chunk
                         chunk_embeddings = await asyncio.to_thread(
@@ -1586,6 +1606,7 @@ class AsyncMemory(MemoryBase):
                             "chunk_index": chunk_index,
                             "total_chunks": len(chunks),
                             "original_message_id": original_message_id,
+                            "original_content_memory_id": mapping_id,
                         })
                 else:
                     # Content is within token limit, process normally
