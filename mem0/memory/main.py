@@ -280,6 +280,73 @@ class Memory(MemoryBase):
         # Use agent memory extraction if agent_id is present and there are assistant messages
         return has_agent_id and has_assistant_messages
 
+    @staticmethod
+    def _cosine_similarity(vec1, vec2):
+        """Compute cosine similarity between two vectors."""
+        dot_product = sum(a * b for a, b in zip(vec1, vec2))
+        magnitude1 = sum(a * a for a in vec1) ** 0.5
+        magnitude2 = sum(b * b for b in vec2) ** 0.5
+        if magnitude1 == 0 or magnitude2 == 0:
+            return 0.0
+        return dot_product / (magnitude1 * magnitude2)
+
+    def _deduplicate_facts(self, facts, threshold=0.85):
+        """Remove near-duplicate facts using embedding similarity.
+
+        When the LLM extracts multiple facts that are semantically very similar
+        (e.g. "User is interested in AI trends" and "User wants to know about AI trends"),
+        this method keeps only the most detailed version to avoid duplicate memories.
+
+        Args:
+            facts: List of fact strings extracted by the LLM.
+            threshold: Cosine similarity threshold above which facts are considered duplicates.
+
+        Returns:
+            tuple: (deduplicated_facts, precomputed_embeddings_dict) where the embeddings
+                   dict maps each kept fact to its embedding vector for reuse downstream.
+        """
+        if len(facts) <= 1:
+            precomputed = {}
+            if facts:
+                precomputed[facts[0]] = self.embedding_model.embed(facts[0], "add")
+            return facts, precomputed
+
+        deduplicated = []
+        deduplicated_embeddings = []
+        precomputed = {}
+
+        for fact in facts:
+            embedding = self.embedding_model.embed(fact, "add")
+
+            is_duplicate = False
+            for j, kept_embedding in enumerate(deduplicated_embeddings):
+                similarity = self._cosine_similarity(embedding, kept_embedding)
+                if similarity >= threshold:
+                    is_duplicate = True
+                    logger.info(
+                        f"Removing near-duplicate fact: '{fact}' "
+                        f"(similar to '{deduplicated[j]}', similarity={similarity:.3f})"
+                    )
+                    # Keep the more detailed (longer) version
+                    if len(fact) > len(deduplicated[j]):
+                        old_fact = deduplicated[j]
+                        if old_fact in precomputed:
+                            del precomputed[old_fact]
+                        deduplicated[j] = fact
+                        deduplicated_embeddings[j] = embedding
+                        precomputed[fact] = embedding
+                    break
+
+            if not is_duplicate:
+                deduplicated.append(fact)
+                deduplicated_embeddings.append(embedding)
+                precomputed[fact] = embedding
+
+        if len(deduplicated) < len(facts):
+            logger.info(f"Deduplicated extracted facts: {len(facts)} -> {len(deduplicated)}")
+
+        return deduplicated, precomputed
+
     def add(
         self,
         messages,
@@ -545,6 +612,11 @@ class Memory(MemoryBase):
         if not new_retrieved_facts:
             logger.debug("No new facts retrieved from input. Skipping memory update LLM call.")
 
+        # Deduplicate extracted facts to prevent near-identical memories
+        precomputed_embeddings = {}
+        if len(new_retrieved_facts) > 1:
+            new_retrieved_facts, precomputed_embeddings = self._deduplicate_facts(new_retrieved_facts)
+
         retrieved_old_memory = []
         new_message_embeddings = {}
         # Search for existing memories using the provided session identifiers
@@ -557,7 +629,11 @@ class Memory(MemoryBase):
         if filters.get("run_id"):
             search_filters["run_id"] = filters["run_id"]
         for new_mem in new_retrieved_facts:
-            messages_embeddings = self.embedding_model.embed(new_mem, "add")
+            # Reuse embeddings from deduplication step if available
+            if new_mem in precomputed_embeddings:
+                messages_embeddings = precomputed_embeddings[new_mem]
+            else:
+                messages_embeddings = self.embedding_model.embed(new_mem, "add")
             new_message_embeddings[new_mem] = messages_embeddings
             existing_memories = self.vector_store.search(
                 query=new_mem,
@@ -1415,6 +1491,73 @@ class AsyncMemory(MemoryBase):
         # Use agent memory extraction if agent_id is present and there are assistant messages
         return has_agent_id and has_assistant_messages
 
+    @staticmethod
+    def _cosine_similarity(vec1, vec2):
+        """Compute cosine similarity between two vectors."""
+        dot_product = sum(a * b for a, b in zip(vec1, vec2))
+        magnitude1 = sum(a * a for a in vec1) ** 0.5
+        magnitude2 = sum(b * b for b in vec2) ** 0.5
+        if magnitude1 == 0 or magnitude2 == 0:
+            return 0.0
+        return dot_product / (magnitude1 * magnitude2)
+
+    async def _deduplicate_facts(self, facts, threshold=0.85):
+        """Remove near-duplicate facts using embedding similarity (async version).
+
+        When the LLM extracts multiple facts that are semantically very similar
+        (e.g. "User is interested in AI trends" and "User wants to know about AI trends"),
+        this method keeps only the most detailed version to avoid duplicate memories.
+
+        Args:
+            facts: List of fact strings extracted by the LLM.
+            threshold: Cosine similarity threshold above which facts are considered duplicates.
+
+        Returns:
+            tuple: (deduplicated_facts, precomputed_embeddings_dict) where the embeddings
+                   dict maps each kept fact to its embedding vector for reuse downstream.
+        """
+        if len(facts) <= 1:
+            precomputed = {}
+            if facts:
+                precomputed[facts[0]] = await asyncio.to_thread(self.embedding_model.embed, facts[0], "add")
+            return facts, precomputed
+
+        deduplicated = []
+        deduplicated_embeddings = []
+        precomputed = {}
+
+        for fact in facts:
+            embedding = await asyncio.to_thread(self.embedding_model.embed, fact, "add")
+
+            is_duplicate = False
+            for j, kept_embedding in enumerate(deduplicated_embeddings):
+                similarity = self._cosine_similarity(embedding, kept_embedding)
+                if similarity >= threshold:
+                    is_duplicate = True
+                    logger.info(
+                        f"Removing near-duplicate fact: '{fact}' "
+                        f"(similar to '{deduplicated[j]}', similarity={similarity:.3f})"
+                    )
+                    # Keep the more detailed (longer) version
+                    if len(fact) > len(deduplicated[j]):
+                        old_fact = deduplicated[j]
+                        if old_fact in precomputed:
+                            del precomputed[old_fact]
+                        deduplicated[j] = fact
+                        deduplicated_embeddings[j] = embedding
+                        precomputed[fact] = embedding
+                    break
+
+            if not is_duplicate:
+                deduplicated.append(fact)
+                deduplicated_embeddings.append(embedding)
+                precomputed[fact] = embedding
+
+        if len(deduplicated) < len(facts):
+            logger.info(f"Deduplicated extracted facts: {len(facts)} -> {len(deduplicated)}")
+
+        return deduplicated, precomputed
+
     async def add(
         self,
         messages,
@@ -1659,6 +1802,11 @@ class AsyncMemory(MemoryBase):
         if not new_retrieved_facts:
             logger.debug("No new facts retrieved from input. Skipping memory update LLM call.")
 
+        # Deduplicate extracted facts to prevent near-identical memories
+        precomputed_embeddings = {}
+        if len(new_retrieved_facts) > 1:
+            new_retrieved_facts, precomputed_embeddings = await self._deduplicate_facts(new_retrieved_facts)
+
         retrieved_old_memory = []
         new_message_embeddings = {}
         # Search for existing memories using the provided session identifiers
@@ -1672,7 +1820,11 @@ class AsyncMemory(MemoryBase):
             search_filters["run_id"] = effective_filters["run_id"]
 
         async def process_fact_for_search(new_mem_content):
-            embeddings = await asyncio.to_thread(self.embedding_model.embed, new_mem_content, "add")
+            # Reuse embeddings from deduplication step if available
+            if new_mem_content in precomputed_embeddings:
+                embeddings = precomputed_embeddings[new_mem_content]
+            else:
+                embeddings = await asyncio.to_thread(self.embedding_model.embed, new_mem_content, "add")
             new_message_embeddings[new_mem_content] = embeddings
             existing_mems = await asyncio.to_thread(
                 self.vector_store.search,

@@ -183,6 +183,8 @@ Compare newly retrieved facts with the existing memory. For each new fact, decid
 - DELETE: Delete an existing memory element
 - NONE: Make no change (if the fact is already present or irrelevant)
 
+Important: If multiple new retrieved facts convey the same or very similar information, only ADD one of them (the most detailed/informative version) and mark the others as NONE. Do not create duplicate or near-duplicate memory entries.
+
 There are specific guidelines to select which operation to perform:
 
 1. **Add**: If the retrieved facts contain new information not present in the memory, then you have to add it by generating a new ID in the id field.
