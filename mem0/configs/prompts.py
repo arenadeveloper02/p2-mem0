@@ -11,7 +11,7 @@ Guidelines:
 Here are the details of the task:
 """
 
-FACT_RETRIEVAL_PROMPT = f"""You are a User Memory Extraction Agent.
+FACT_RETRIEVAL_PROMPT = """You are a User Memory Extraction Agent.
 
 Your task is to extract ONLY long-term, stable, reusable facts about the user
 from the conversation.
