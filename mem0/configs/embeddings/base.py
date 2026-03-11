@@ -40,6 +40,12 @@ class BaseEmbedderConfig(ABC):
         aws_access_key_id: Optional[str] = None,
         aws_secret_access_key: Optional[str] = None,
         aws_region: Optional[str] = None,
+        # Chunking configuration for handling long content
+        max_input_tokens: Optional[int] = None,
+        chunk_size_tokens: Optional[int] = None,
+        chunk_overlap_tokens: Optional[int] = None,
+        min_chunk_size_chars: Optional[int] = None,
+        enable_chunking: Optional[bool] = None,
     ):
         """
         Initializes a configuration class instance for the Embeddings.
@@ -107,4 +113,11 @@ class BaseEmbedderConfig(ABC):
         self.aws_access_key_id = aws_access_key_id
         self.aws_secret_access_key = aws_secret_access_key
         self.aws_region = aws_region or os.environ.get("AWS_REGION") or "us-west-2"
+
+        # Chunking configuration for handling long content
+        self.max_input_tokens = max_input_tokens if max_input_tokens is not None else 8191  # Default for text-embedding-3-small
+        self.chunk_size_tokens = chunk_size_tokens if chunk_size_tokens is not None else 1024
+        self.chunk_overlap_tokens = chunk_overlap_tokens if chunk_overlap_tokens is not None else 200
+        self.min_chunk_size_chars = min_chunk_size_chars if min_chunk_size_chars is not None else 100
+        self.enable_chunking = enable_chunking if enable_chunking is not None else True
 

@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 from typing import Any, Dict, List, Optional
@@ -6,6 +7,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
 from pydantic import BaseModel, Field
 
 from mem0 import Memory
@@ -22,15 +24,16 @@ logging.basicConfig(
 load_dotenv()
 
 
-# Milvus Configuration
-MILVUS_HOST = os.environ.get("MILVUS_HOST", "milvus")
-MILVUS_PORT = os.environ.get("MILVUS_PORT", "19530")
-MILVUS_URL = os.environ.get("MILVUS_URL", f"http://{MILVUS_HOST}:{MILVUS_PORT}")
-MILVUS_TOKEN = os.environ.get("MILVUS_TOKEN", "")  # Empty for local setup, required for Zilliz Cloud
-MILVUS_COLLECTION_NAME = os.environ.get("MILVUS_COLLECTION_NAME", "memories")
-MILVUS_DB_NAME = os.environ.get("MILVUS_DB_NAME", "")
-MILVUS_EMBEDDING_DIMS = int(os.environ.get("MILVUS_EMBEDDING_DIMS", "1536"))  # text-embedding-3-small dimensions
-MILVUS_METRIC_TYPE = os.environ.get("MILVUS_METRIC_TYPE", "COSINE")  # COSINE, L2, or IP
+# Postgres Configuration (pgvector)
+POSTGRES_HOST = os.environ.get("POSTGRES_HOST", "postgres")
+POSTGRES_PORT = int(os.environ.get("POSTGRES_PORT", "5432"))
+POSTGRES_USER = os.environ.get("POSTGRES_USER", "postgres")
+POSTGRES_PASSWORD = os.environ.get("POSTGRES_PASSWORD", "postgres")
+POSTGRES_DBNAME = os.environ.get("POSTGRES_DBNAME", "postgres")
+POSTGRES_COLLECTION_NAME = os.environ.get("POSTGRES_COLLECTION_NAME", "memories")
+POSTGRES_EMBEDDING_DIMS = int(os.environ.get("POSTGRES_EMBEDDING_DIMS", "1536"))  # text-embedding-3-small dimensions
+POSTGRES_SSLMODE = os.environ.get("POSTGRES_SSLMODE", None)  # Optional: 'require', 'prefer', 'disable', etc.
+POSTGRES_CONNECTION_STRING = os.environ.get("POSTGRES_CONNECTION_STRING", None)  # Optional: full connection string
 
 # Neo4j Configuration (for graph store - optional)
 # Check if Neo4j should be enabled (via environment variable)
@@ -95,18 +98,35 @@ else:
 DEFAULT_CONFIG = {
     "version": "v1.1",
     "vector_store": {
-        "provider": "milvus",
+        "provider": "pgvector",
         "config": {
-            "url": MILVUS_URL,
-            "token": MILVUS_TOKEN,
-            "collection_name": MILVUS_COLLECTION_NAME,
-            "embedding_model_dims": MILVUS_EMBEDDING_DIMS,
-            "metric_type": MILVUS_METRIC_TYPE,
-            "db_name": MILVUS_DB_NAME,
+            "host": POSTGRES_HOST,
+            "port": POSTGRES_PORT,
+            "user": POSTGRES_USER,
+            "password": POSTGRES_PASSWORD,
+            "dbname": POSTGRES_DBNAME,
+            "collection_name": POSTGRES_COLLECTION_NAME,
+            "embedding_model_dims": POSTGRES_EMBEDDING_DIMS,
+            "hnsw": True,  # Use HNSW indexing for faster search
+            "diskann": False,  # Optional: requires pgvectorscale extension
+            "sslmode": POSTGRES_SSLMODE,  # Optional SSL mode
+            # Alternative: use connection_string instead of individual params
+            # "connection_string": POSTGRES_CONNECTION_STRING,
         },
     },
     "llm": {"provider": "openai", "config": {"api_key": OPENAI_API_KEY, "temperature": 0.2, "model": "gpt-4.1-nano-2025-04-14"}},
-    "embedder": {"provider": "openai", "config": {"api_key": OPENAI_API_KEY, "model": "text-embedding-3-small"}},
+    "embedder": {
+        "provider": "openai",
+        "config": {
+            "api_key": OPENAI_API_KEY,
+            "model": "text-embedding-3-small",
+            "max_input_tokens": 8191,
+            "chunk_size_tokens": 1024,
+            "chunk_overlap_tokens": 200,
+            "min_chunk_size_chars": 100,
+            "enable_chunking": True,
+        },
+    },
     "history_db_path": HISTORY_DB_PATH,
 }
 
@@ -134,7 +154,100 @@ app = FastAPI(
     title="Mem0 REST APIs",
     description="A REST API for managing and searching memories for your AI Agents and Apps.",
     version="1.0.0",
+    root_path="/mem",
 )
+
+# Middleware to strip /mem prefix from request paths
+class PathPrefixMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        # Strip /mem prefix if present
+        original_path = request.url.path
+        original_method = request.method
+        
+        if original_path.startswith("/mem/"):
+            # Rewrite the path by removing /mem prefix
+            new_path = original_path[4:]  # Remove "/mem" (4 characters)
+        elif original_path == "/mem":
+            new_path = "/"
+        else:
+            new_path = original_path
+        
+        # Log path rewriting for debugging
+        if new_path != original_path:
+            logging.info(f"PathPrefixMiddleware: Rewriting {original_method} {original_path} -> {new_path}")
+            # Create a new request with modified path
+            scope = dict(request.scope)
+            scope["path"] = new_path
+            scope["raw_path"] = new_path.encode()
+            # Create new request with modified scope
+            request = Request(scope, request.receive)
+        else:
+            logging.info(f"PathPrefixMiddleware: No rewrite needed for {original_method} {original_path}")
+        
+        return await call_next(request)
+
+
+# Add middleware to log all requests with client IP
+class LoggingMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        # Get client IP address
+        client_ip = request.client.host if request.client else "unknown"
+        # Check for forwarded IP (in case behind proxy)
+        forwarded_for = request.headers.get("X-Forwarded-For")
+        real_ip = request.headers.get("X-Real-IP")
+        if forwarded_for:
+            client_ip = forwarded_for.split(",")[0].strip()
+        elif real_ip:
+            client_ip = real_ip
+        
+        # Log request details
+        logging.info(
+            f"Request: {request.method} {request.url.path} | "
+            f"Client IP: {client_ip} | "
+            f"User-Agent: {request.headers.get('user-agent', 'unknown')} | "
+            f"Origin: {request.headers.get('origin', 'unknown')}"
+        )
+        
+        try:
+            response = await call_next(request)
+            
+            # Log response details including headers
+            response_headers = dict(response.headers) if hasattr(response, 'headers') else {}
+            content_type = response_headers.get('content-type', 'unknown')
+            content_length = response_headers.get('content-length', 'unknown')
+            
+            logging.info(
+                f"Response: {request.method} {request.url.path} | "
+                f"Status: {response.status_code} | "
+                f"Client IP: {client_ip} | "
+                f"Content-Type: {content_type} | "
+                f"Content-Length: {content_length}"
+            )
+            
+            # If status is not 200, log warning
+            if response.status_code != 200:
+                logging.warning(
+                    f"Non-200 response detected: {response.status_code} for {request.method} {request.url.path} | "
+                    f"Client IP: {client_ip}"
+                )
+            
+            return response
+        except Exception as e:
+            logging.error(
+                f"Error processing request: {request.method} {request.url.path} | "
+                f"Client IP: {client_ip} | "
+                f"Error: {str(e)}"
+            )
+            raise
+
+# Needed to respect X-Forwarded headers from AWS ALB
+# app.add_middleware(ProxyHeadersMiddleware, trusted_hosts="*")
+
+# Add path prefix middleware first (strips /mem prefix)
+# Note: Middleware executes in reverse order, so this will run first
+app.add_middleware(PathPrefixMiddleware)
+# Add logging middleware
+app.add_middleware(LoggingMiddleware)
 
 # Add CORS middleware to handle cross-origin requests
 app.add_middleware(
@@ -166,6 +279,7 @@ class SearchRequest(BaseModel):
     run_id: Optional[str] = None
     agent_id: Optional[str] = None
     filters: Optional[Dict[str, Any]] = None
+    limit: Optional[int] = Field(default=100, description="Maximum number of results to return. Defaults to 100.")
 
 
 @app.post("/configure", summary="Configure Mem0")
@@ -179,8 +293,18 @@ def set_config(config: Dict[str, Any]):
 @app.post("/memories", summary="Create memories")
 def add_memory(request: Request, memory_create: MemoryCreate):
     """Store new memories."""
+    # Get client IP for detailed logging
+    client_ip = request.client.host if request.client else "unknown"
+    forwarded_for = request.headers.get("X-Forwarded-For")
+    real_ip = request.headers.get("X-Real-IP")
+    if forwarded_for:
+        client_ip = forwarded_for.split(",")[0].strip()
+    elif real_ip:
+        client_ip = real_ip
+    
     # Log request details for debugging
-    logging.info(f"Request headers: {request}")
+    logging.info(f"Request from IP: {client_ip}")
+    logging.info(f"Request headers: {dict(request.headers)}")
     logging.info(f"Received add_memory request: user_id={memory_create.user_id}, agent_id={memory_create.agent_id}, run_id={memory_create.run_id}, messages_count={len(memory_create.messages) if memory_create.messages else 0}, infer={memory_create.infer} (type: {type(memory_create.infer)})")
     
     if not any([memory_create.user_id, memory_create.agent_id, memory_create.run_id]):
@@ -204,8 +328,21 @@ def add_memory(request: Request, memory_create: MemoryCreate):
     try:
         response = MEMORY_INSTANCE.add(messages=[m.model_dump() for m in memory_create.messages], **params)
         results_count = len(response.get('results', [])) if isinstance(response, dict) else 0
-        logging.info(f"Memory add completed. Stored {results_count} memories. Response keys: {list(response.keys()) if isinstance(response, dict) else 'N/A'}")
-        return JSONResponse(content=response)
+        chunked = any(result.get('chunk_index', -1) >= 0 for result in response.get('results', [])) if isinstance(response, dict) else False
+        logging.info(f"Memory add completed. Stored {results_count} memories ({'CHUNKED' if chunked else 'NOT CHUNKED'}). Response keys: {list(response.keys()) if isinstance(response, dict) else 'N/A'}")
+        
+        # Create JSONResponse with explicit status code
+        json_response = JSONResponse(content=response, status_code=200)
+        
+        # Log response details for debugging
+        response_str = json.dumps(response) if isinstance(response, dict) else str(response)
+        response_size = len(response_str.encode('utf-8'))
+        logging.info(
+            f"Returning response: Status=200, Size={response_size} bytes, "
+            f"Content-Type=application/json, Results={results_count}"
+        )
+        
+        return json_response
     except Exception as e:
         logging.exception("Error in add_memory:")  # This will log the full traceback
         raise HTTPException(status_code=500, detail=str(e))
@@ -230,6 +367,95 @@ def get_all_memories(
         return result
     except Exception as e:
         logging.exception("Error in get_all_memories:")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/memories/original-prompt", summary="Get original prompt data instead of chunked data")
+def get_original_prompt_memories(
+    user_id: Optional[str] = None,
+    run_id: Optional[str] = None,
+    agent_id: Optional[str] = None,
+):
+    """
+    Retrieve memories with original prompt data instead of chunked data.
+    For chunked memories, returns the full original content from memory_chunk_mapping table.
+    For non-chunked memories, returns them as-is.
+    """
+    if not any([user_id, run_id, agent_id]):
+        raise HTTPException(status_code=400, detail="At least one identifier is required.")
+    try:
+        params = {
+            k: v for k, v in {"user_id": user_id, "run_id": run_id, "agent_id": agent_id}.items() if v is not None
+        }
+        logging.info(f"Retrieving original prompt memories with filters: {params}")
+        
+        # Get all memories (including chunks)
+        result = MEMORY_INSTANCE.get_all(**params)
+        memories = result.get("results", [])
+        
+        # Process memories to replace chunks with original content
+        processed_memories = []
+        seen_original_message_ids = set()
+        
+        for mem in memories:
+            metadata = mem.get("metadata", {})
+            is_chunk = metadata.get("is_chunk", False)
+            original_message_id = metadata.get("original_message_id")
+            original_content_memory_id = metadata.get("original_content_memory_id")
+            
+            if is_chunk and original_message_id and original_content_memory_id:
+                # Skip if we've already processed this original message
+                if original_message_id in seen_original_message_ids:
+                    continue
+                
+                # Mark as seen
+                seen_original_message_ids.add(original_message_id)
+                
+                # Fetch original content from memory_chunk_mapping table
+                try:
+                    mapping_data = MEMORY_INSTANCE.db.get_chunk_mapping(original_content_memory_id)
+                    if mapping_data:
+                        # Create a new memory entry with original content
+                        original_memory = {
+                            "id": original_message_id,  # Use original_message_id as the ID
+                            "memory": mapping_data["original_content"],
+                            "hash": None,  # Original content hash (could be computed if needed)
+                            "created_at": mapping_data.get("created_at"),
+                            "updated_at": None,
+                            "user_id": mem.get("user_id"),
+                            "agent_id": mem.get("agent_id"),
+                            "run_id": mem.get("run_id"),
+                            "actor_id": mem.get("actor_id"),
+                            "role": mem.get("role"),
+                            "metadata": {
+                                "is_original_content": True,
+                                "original_content_memory_id": original_content_memory_id,
+                                "original_token_count": mapping_data.get("original_token_count"),
+                                "total_chunks": mapping_data.get("total_chunks"),
+                            }
+                        }
+                        processed_memories.append(original_memory)
+                    else:
+                        # If mapping not found, log warning and skip
+                        logging.warning(f"Original content mapping not found for ID: {original_content_memory_id}")
+                except Exception as e:
+                    logging.warning(f"Error fetching original content for mapping ID {original_content_memory_id}: {e}")
+                    # Continue with next memory
+                    continue
+            else:
+                # Non-chunked memory, add as-is
+                processed_memories.append(mem)
+        
+        logging.info(f"Retrieved {len(processed_memories)} original prompt memories (from {len(memories)} total memories)")
+        
+        # Return in same format as get_all
+        response = {"results": processed_memories}
+        if "relations" in result:
+            response["relations"] = result["relations"]
+        
+        return response
+    except Exception as e:
+        logging.exception("Error in get_original_prompt_memories:")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -323,6 +549,14 @@ def reset_memory():
         logging.exception("Error in reset_memory:")
         raise HTTPException(status_code=500, detail=str(e))
 
+
+@app.get("/health", summary="Health check endpoint")
+def health_check():
+    """Simple health check endpoint to test connectivity."""
+    return JSONResponse(
+        content={"status": "healthy", "message": "API is running"},
+        status_code=200
+    )
 
 @app.get("/", summary="Redirect to the OpenAPI documentation", include_in_schema=False)
 def home():
